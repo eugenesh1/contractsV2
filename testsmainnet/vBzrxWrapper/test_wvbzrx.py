@@ -22,11 +22,18 @@ def vbzrx(accounts, BZRXVestingToken):
 
 
 @pytest.fixture(scope="module")
-def wrapper(accounts, VBZRXWrapper):
-    return VBZRXWrapper.deploy({"from": accounts[0]})
+def wvbzrxProxy(accounts, VBZRXWrapper, VBZRXWrapperProxy):
+    impl = VBZRXWrapper.deploy({"from": accounts[0]})
+    return VBZRXWrapperProxy.deploy(impl, bytes(0), {'from': accounts[0]})
+
+
+@pytest.fixture(scope="module")
+def wrapper(accounts, VBZRXWrapper, wvbzrxProxy):
+    return Contract.from_abi("wrapper", address=wvbzrxProxy, abi=VBZRXWrapper.abi, owner=accounts[0])
 
 
 vbzrxMajorAddress = "0x29dce6d3039644c66c456998de3bd723b141ff16";
+
 
 def test_mainflow(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     account1 = accounts[1]
@@ -48,35 +55,91 @@ def test_mainflow(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     assert vbzrx.vestedBalanceOf(account1) == 0
     assert bzrx.balanceOf(account1) >= vestedBalance + bzrxBalanceBefore1
     assert bzrx.balanceOf(account1) > bzrxBalanceBefore1
-    assert wrapper.claimable(account1) == 0
+    assert wrapper.claimable(account1, {"from": account1}) == 0
 
     chain.mine()
-    assert wrapper.claimable(account1) > 0
+    assert wrapper.claimable(account1, {"from": account1}) > 0
 
     tx3 = wrapper.transfer(account2, depositAmount, {"from": account1})
-    assert wrapper.balanceOf(account1) == 0
-    assert wrapper.balanceOf(account2) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
-    assert wrapper.claimable(account1) == 0
-    assert wrapper.claimable(account2) > 0
-    assert vbzrx.vestedBalanceOf(account2) == 0
-    assert vbzrx.vestedBalanceOf(account1) == 0
+    assert wrapper.balanceOf(account1, {"from": account1}) == 0
+    assert wrapper.balanceOf(account2, {"from": account2}) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert wrapper.claimable(account1, {"from": account1}) == 0
+    assert wrapper.claimable(account2, {"from": account2}) > 0
+    assert vbzrx.vestedBalanceOf(account2, {"from": account2}) == 0
+    assert vbzrx.vestedBalanceOf(account1, {"from": account1}) == 0
     wrapper.claim({"from": account2});
     assert bzrx.balanceOf(account2) > bzrxBalanceBefore2
-    assert wrapper.claimable(account2) == 0
-
+    assert wrapper.claimable(account2, {"from": account2}) == 0
 
     tx4 = wrapper.withdraw(depositAmount, {"from": account2})
     assert vbzrx.balanceOf(account2) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
     assert vbzrx.vestedBalanceOf(account2) == 0
-    claimable2 = wrapper.claimable(account2)
+    claimable2 = wrapper.claimable(account2, {"from": account2})
     assert claimable2 > 0
     chain.mine()
-    assert wrapper.claimable(account2) == claimable2
+    assert wrapper.claimable(account2, {"from": account2}) == claimable2
     wrapper.claim({"from": account2})
-    assert vbzrx.vestedBalanceOf(account2)  > 0
-    assert wrapper.claimable(account2)  == 0
+    assert vbzrx.vestedBalanceOf(account2) > 0
+    assert wrapper.claimable(account2, {"from": account2}) == 0
     assert vbzrx.vestedBalanceOf(account2) > 0
 
+
+def test_mainflowChangeProxy(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper, VBZRXWrapper, wvbzrxProxy):
+    adminAccount = accounts[0]
+    account1 = accounts[3]
+    account2 = accounts[4]
+
+    vbzrxBalanceBefore = vbzrx.balanceOf(account1)
+    bzrxBalanceBefore1 = bzrx.balanceOf(account1)
+    bzrxBalanceBefore2 = bzrx.balanceOf(account2)
+    tx1 = vbzrx.transfer(account1, INITIAL_LP_TOKEN_ACCOUNT_AMOUNT, {"from": vbzrxMajorAddress})
+    vbzrxBalanceAfter = vbzrxBalanceBefore + INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert vbzrx.balanceOf(account1) == vbzrxBalanceAfter
+    assert vbzrx.vestedBalanceOf(account1) == 0
+    chain.mine()
+
+    vbzrx.approve(wrapper, vbzrx.balanceOf(account1), {"from": account1})
+    depositAmount = vbzrx.balanceOf(account1);
+    vestedBalance = vbzrx.vestedBalanceOf(account1);
+    assert vestedBalance > 0
+    tx2 = wrapper.deposit(depositAmount, {"from": account1})
+
+    assert vbzrx.vestedBalanceOf(account1) == 0
+    assert bzrx.balanceOf(account1) >= vestedBalance + bzrxBalanceBefore1
+    assert bzrx.balanceOf(account1) > bzrxBalanceBefore1
+    assert wrapper.claimable(account1, {"from": account1}) == 0
+
+    chain.mine()
+    # Set new implementation
+    impl = VBZRXWrapper.deploy({"from": adminAccount})
+    wvbzrxProxy.upgradeTo(impl, {"from": adminAccount})
+
+    with reverts("TransparentUpgradeableProxy: admin cannot fallback to proxy target"):
+        wrapper.claimable(account1, {"from": accounts[0]})
+
+    assert wrapper.claimable(account1, {"from": account1}) > 0
+    tx3 = wrapper.transfer(account2, depositAmount, {"from": account1})
+    assert wrapper.balanceOf(account1, {"from": account1}) == 0
+    assert wrapper.balanceOf(account2, {"from": account2}) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert wrapper.claimable(account1, {"from": account1}) == 0
+    assert wrapper.claimable(account2, {"from": account2}) > 0
+    assert vbzrx.vestedBalanceOf(account2) == 0
+    assert vbzrx.vestedBalanceOf(account1) == 0
+    wrapper.claim({"from": account2});
+    assert bzrx.balanceOf(account2) > bzrxBalanceBefore2
+    assert wrapper.claimable(account2, {"from": account2}) == 0
+
+    tx4 = wrapper.withdraw(depositAmount, {"from": account2})
+    assert vbzrx.balanceOf(account2) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert vbzrx.vestedBalanceOf(account2) == 0
+    claimable2 = wrapper.claimable(account2, {"from": account2})
+    assert claimable2 > 0
+    chain.mine()
+    assert wrapper.claimable(account2, {"from": account2}) == claimable2
+    wrapper.claim({"from": account2})
+    assert vbzrx.vestedBalanceOf(account2) > 0
+    assert wrapper.claimable(account2, {"from": account2}) == 0
+    assert vbzrx.vestedBalanceOf(account2) > 0
 
 
 def test_exit(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
@@ -87,13 +150,13 @@ def test_exit(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     tx2 = wrapper.deposit(depositAmount, {"from": account1})
     assert bzrx.balanceOf(account1) > 0
     assert vbzrx.balanceOf(account1) == 0
-    assert wrapper.balanceOf(account1) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert wrapper.balanceOf(account1, {"from": account1}) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
     chain.mine()
     bzrxBalanceBefore = bzrx.balanceOf(account1)
     tx3 = wrapper.exit({"from": account1})
     assert bzrx.balanceOf(account1) > bzrxBalanceBefore
     assert vbzrx.balanceOf(account1) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
-    assert wrapper.balanceOf(account1) == 0
+    assert wrapper.balanceOf(account1, {"from": account1}) == 0
 
 
 def test_events(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
@@ -103,10 +166,10 @@ def test_events(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     depositAmount = vbzrx.balanceOf(account1);
     tx2 = wrapper.deposit(depositAmount, {"from": account1})
     depositEvent = tx2.events['Deposit']
-    assert depositEvent['value'] == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert depositEvent['value'] == depositAmount
     tx3 = wrapper.exit({"from": account1})
     withdrawal = tx3.events['Withdraw']
-    assert withdrawal['value'] == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT
+    assert withdrawal['value'] == depositAmount
 
 
 def test_transfer1(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
@@ -121,13 +184,15 @@ def test_transfer1(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     wrapper.transfer(account2, depositAmount / 2, {"from": account1})
     chain.sleep(60 * 60 * 24)
     chain.mine()
-    assert abs(wrapper.claimable(account2) - wrapper.claimable(account1)) / 1e18 < 5e-6
+    assert abs(
+        wrapper.claimable(account2, {"from": account1}) - wrapper.claimable(account1, {"from": account1})) / 1e18 < 5e-6
     wrapper.claim({"from": account1})
     chain.sleep(60 * 60 * 24)
     chain.mine()
     wrapper.exit({"from": account2})
     wrapper.exit({"from": account1})
     assert abs((bzrx.balanceOf(account1)) - balanceBefore1 - bzrx.balanceOf(account2)) / 1e18 < 5e-6
+
 
 def test_transfer2(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     account1 = accounts[5]
@@ -142,8 +207,8 @@ def test_transfer2(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     wrapper.transfer(account2, depositAmount / 2, {"from": account1})
     chain.sleep(60 * 60 * 24)
     chain.mine()
-    #Claimable should be the same for both accounts (+-2)
-    assert abs(wrapper.claimable(account2) - wrapper.claimable(account1)) < 2
+    # Claimable should be the same for both accounts (+-2)
+    assert abs(wrapper.claimable(account2, {"from": account2}) - wrapper.claimable(account1, {"from": account1})) < 2
 
 
 def test_deposit_more_than_have(requireMainnetFork, vbzrx, accounts, wrapper):
@@ -161,6 +226,7 @@ def test_deposit_more_than_approved(requireMainnetFork, vbzrx, accounts, wrapper
     with reverts("insufficient-allowance"):
         wrapper.deposit(vbzrx.balanceOf(account1), {"from": account1})
 
+
 def test_multiple_deposit_withdraw(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     for i in [1, 3]:
         account1 = accounts[i]
@@ -168,19 +234,19 @@ def test_multiple_deposit_withdraw(requireMainnetFork, bzrx, vbzrx, chain, accou
         vbzrx.transfer(account1, INITIAL_LP_TOKEN_ACCOUNT_AMOUNT, {"from": vbzrxMajorAddress})
         vbzrx.approve(wrapper, vbzrx.balanceOf(account1), {"from": account1})
         depositAmount = vbzrx.balanceOf(account1);
-        #assert False
+        # assert False
         for i in range(5):
-            wrapper.deposit(depositAmount/5, {"from": account1})
+            wrapper.deposit(depositAmount / 5, {"from": account1})
             chain.sleep(60 * 60 * 24)
             chain.mine()
-            assert wrapper.claimable(account1) > 0
+            assert wrapper.claimable(account1, {"from": account1}) > 0
             wrapper.claim({"from": account1})
 
         for i in range(5):
-            wrapper.withdraw(depositAmount/5, {"from": account1})
+            wrapper.withdraw(depositAmount / 5, {"from": account1})
             chain.sleep(60 * 60 * 24)
             chain.mine()
-            assert wrapper.claimable(account1) > 0
+            assert wrapper.claimable(account1, {"from": account1}) > 0
     for i in [1, 3]:
         account1 = accounts[i]
         wrapper.claim({"from": account1})
@@ -191,23 +257,23 @@ def test_multiuser_withdraw1(requireMainnetFork, bzrx, vbzrx, chain, accounts, w
         account1 = accounts[i]
         account2 = accounts[i + 1];
         vbzrx.transfer(account1, INITIAL_LP_TOKEN_ACCOUNT_AMOUNT, {"from": vbzrxMajorAddress})
-        depositAmount = vbzrx.balanceOf(account1)/2;
+        depositAmount = vbzrx.balanceOf(account1) / 2;
         vbzrx.transfer(account2, depositAmount, {"from": account1})
         vbzrx.approve(wrapper, vbzrx.balanceOf(account1), {"from": account1})
         vbzrx.approve(wrapper, vbzrx.balanceOf(account2), {"from": account2})
 
-        wrapper.deposit(depositAmount/2, {"from": account1})
-        wrapper.deposit(depositAmount/2, {"from": account2})
-        wrapper.deposit(depositAmount/2, {"from": account1})
-        wrapper.deposit(depositAmount/2, {"from": account2})
+        wrapper.deposit(depositAmount / 2, {"from": account1})
+        wrapper.deposit(depositAmount / 2, {"from": account2})
+        wrapper.deposit(depositAmount / 2, {"from": account1})
+        wrapper.deposit(depositAmount / 2, {"from": account2})
         chain.sleep(60 * 60 * 24)
         chain.mine()
-        assert wrapper.claimable(account1) > 0
-        assert wrapper.claimable(account2) > 0
-        wrapper.withdraw(wrapper.balanceOf(account2), {"from": account2})
-        assert wrapper.claimable(account2) > 0
-        wrapper.withdraw(wrapper.balanceOf(account1), {"from": account1})
-        assert wrapper.claimable(account1) > 0
+        assert wrapper.claimable(account1, {"from": account1}) > 0
+        assert wrapper.claimable(account2, {"from": account2}) > 0
+        wrapper.withdraw(wrapper.balanceOf(account2, {"from": account2}), {"from": account2})
+        assert wrapper.claimable(account2, {"from": account2}) > 0
+        wrapper.withdraw(wrapper.balanceOf(account1, {"from": account1}), {"from": account1})
+        assert wrapper.claimable(account1, {"from": account1}) > 0
 
 
 def test_multiuser_withdraw2(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
@@ -224,12 +290,13 @@ def test_multiuser_withdraw2(requireMainnetFork, bzrx, vbzrx, chain, accounts, w
         wrapper.claim({"from": account1})
         chain.sleep(60 * 60 * 24)
         chain.mine()
-        assert wrapper.claimable(account1) > 0
-        assert wrapper.claimable(account2) > 0
-        wrapper.withdraw(wrapper.balanceOf(account2), {"from": account2})
-        assert wrapper.claimable(account2) > 0
-        wrapper.withdraw(wrapper.balanceOf(account1), {"from": account1})
-        assert wrapper.claimable(account1) > 0
+        assert wrapper.claimable(account1, {"from": account1}) > 0
+        assert wrapper.claimable(account2, {"from": account2}) > 0
+        wrapper.withdraw(wrapper.balanceOf(account2, {"from": account2}), {"from": account2})
+        assert wrapper.claimable(account2, {"from": account2}) > 0
+        wrapper.withdraw(wrapper.balanceOf(account1, {"from": account1}), {"from": account1})
+        assert wrapper.claimable(account1, {"from": account1}) > 0
+
 
 def test_multiuser_exit(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrapper):
     for i in [1, 3, 5, 7]:
@@ -248,6 +315,7 @@ def test_multiuser_exit(requireMainnetFork, bzrx, vbzrx, chain, accounts, wrappe
         wrapper.exit({"from": account2})
         wrapper.exit({"from": account1})
 
+
 def test_user_able_to_claim_before_vesting_last_claim_timestamp(requireMainnetFork, bzrx, vbzrx, chain, accounts,
                                                                 wrapper):
     account1 = accounts[4]
@@ -263,21 +331,21 @@ def test_user_able_to_claim_before_vesting_last_claim_timestamp(requireMainnetFo
     chain.mine()
     wrapper.claim({"from": account1});
     assert bzrx.balanceOf(account1) > balanceBefore1
-    assert wrapper.claimable(account1) == 0
+    assert wrapper.claimable(account1, {"from": account1}) == 0
 
     # sleep up to vestingLastClaimTimestamp
-    if(vbzrx.vestingLastClaimTimestamp() > chain.time()):
+    if (vbzrx.vestingLastClaimTimestamp() > chain.time()):
         chain.sleep((vbzrx.vestingLastClaimTimestamp() - chain.time()) - 10)
     chain.mine()
     balanceBefore2 = bzrx.balanceOf(account1)
-    assert wrapper.claimable(account1) > 0
+    assert wrapper.claimable(account1, {"from": account1}) > 0
     tx3 = wrapper.exit({"from": account1})
     assert bzrx.balanceOf(account1) > balanceBefore2
     assert vbzrx.balanceOf(account1) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT + vBzrxBalanceBefore1
 
 
 def test_user_unable_to_claim_after_vesting_last_claim_timestamp(requireMainnetFork, bzrx, vbzrx, chain, accounts,
-                                                       wrapper):
+                                                                 wrapper):
     account1 = accounts[4]
     vbzrxBalanceBefore = vbzrx.balanceOf(account1)
     tx1 = vbzrx.transfer(account1, INITIAL_LP_TOKEN_ACCOUNT_AMOUNT, {"from": vbzrxMajorAddress})
@@ -286,11 +354,11 @@ def test_user_unable_to_claim_after_vesting_last_claim_timestamp(requireMainnetF
     tx2 = wrapper.deposit(depositAmount, {"from": account1})
     balanceBefore = bzrx.balanceOf(account1)
     # sleep up to vestingLastClaimTimestamp
-    if(vbzrx.vestingLastClaimTimestamp() > chain.time()):
+    if (vbzrx.vestingLastClaimTimestamp() > chain.time()):
         chain.sleep((vbzrx.vestingLastClaimTimestamp() - chain.time()) + 1)
 
     chain.mine()
-    assert wrapper.claimable(account1) == 0
+    assert wrapper.claimable(account1, {"from": account1}) == 0
     wrapper.exit({"from": account1});
     assert bzrx.balanceOf(account1) == balanceBefore
     assert vbzrx.balanceOf(account1) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT + vbzrxBalanceBefore
@@ -299,6 +367,27 @@ def test_user_unable_to_claim_after_vesting_last_claim_timestamp(requireMainnetF
     assert bzrx.balanceOf(account1) == balanceBefore
 
 
+def test_user_unable_to_claim_after_vesting_last_claim_timestamp(requireMainnetFork, bzrx, vbzrx, chain, accounts,
+                                                                 wrapper):
+    account1 = accounts[4]
+    vbzrxBalanceBefore = vbzrx.balanceOf(account1)
+    tx1 = vbzrx.transfer(account1, INITIAL_LP_TOKEN_ACCOUNT_AMOUNT, {"from": vbzrxMajorAddress})
+    vbzrx.approve(wrapper, vbzrx.balanceOf(account1), {"from": account1})
+    depositAmount = vbzrx.balanceOf(account1);
+    tx2 = wrapper.deposit(depositAmount, {"from": account1})
+    balanceBefore = bzrx.balanceOf(account1)
+    # sleep up to vestingLastClaimTimestamp
+    if (vbzrx.vestingLastClaimTimestamp() > chain.time()):
+        chain.sleep((vbzrx.vestingLastClaimTimestamp() - chain.time()) + 1)
+
+    chain.mine()
+    assert wrapper.claimable(account1, {"from": account1}) == 0
+    wrapper.exit({"from": account1});
+    assert bzrx.balanceOf(account1) == balanceBefore
+    assert vbzrx.balanceOf(account1) == INITIAL_LP_TOKEN_ACCOUNT_AMOUNT + vbzrxBalanceBefore
+    assert vbzrx.claimedBalanceOf(account1) > 0
+    vbzrx.claim({"from": account1})
+    assert bzrx.balanceOf(account1) == balanceBefore
 
 # Not important case. User will not be able to claim after vesting_last_claim_timestamp.
 #
@@ -312,6 +401,3 @@ def test_user_unable_to_claim_after_vesting_last_claim_timestamp(requireMainnetF
 #     tx2 = wrapper.deposit(depositAmount, {"from": account1})
 #     assert vbzrx.balanceOf(account1) == vbzrxBalanceBefore1
 #     assert wrapper.balanceOf(account1) == wrapperBalanceBefore1
-
-
-
